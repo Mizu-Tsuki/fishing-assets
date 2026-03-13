@@ -1,58 +1,67 @@
 /**
- * Data_Fetch_Asset: 資產收割機
- * 負責從 GW2 API 抓取玩家帳號內的物品資料並存入快取。
+ * Data_Fetch_Asset: 資產收割機 (完全體)
  */
-
 const Data_Fetch_Asset = {
 
-  /**
-   * 執行全域收割 (主進入點)
-   */
   fetchAll: function() {
-    console.log("開始執行全域資產收割...");
-    
-    // 1. 收割銀行
-    this.fetchBank();
-    
-    // 2. 收割素材倉庫
-    this.fetchMaterials();
+    console.log("🚀 開始執行全域資產併發收割...");
+    const allResults = [];
+    const timestamp = new Date();
 
-    // 💡 以後如果要加「角色包包」，就加在這裡
-    // this.fetchCharactersInventory();
-
-    console.log("全域資產收割完成。");
-  },
-
-  /**
-   * 抓取銀行資料
-   */
-  fetchBank: function() {
-    const endpoint = "/account/bank";
-    const data = Conn_GW2.fetch(endpoint);
+    // --- 第一階段：銀行與素材庫 (基本盤) ---
+    const baseEndpoints = {
+      "ASSET_BANK": "/account/bank",
+      "ASSET_MATERIALS": "/account/materials"
+    };
     
-    if (data) {
-      Data_System_Cache.save("ASSET_BANK", data);
-      console.log("銀行資料已更新至快取。");
+    for (let key in baseEndpoints) {
+      const data = Conn_GW2.fetch(baseEndpoints[key]);
+      if (data) allResults.push([key, JSON.stringify(data), timestamp]);
     }
-  },
 
-  /**
-   * 抓取素材倉庫資料
-   */
-  fetchMaterials: function() {
-    const endpoint = "/account/materials";
-    const data = Conn_GW2.fetch(endpoint);
+    // --- 第二階段：角色背包 (併發分組盤) ---
+    console.log("👤 正在獲取角色清單...");
+    const charNames = Conn_GW2.fetch("/characters");
     
-    if (data) {
-      Data_System_Cache.save("ASSET_MATERIALS", data);
-      console.log("素材倉庫資料已更新至快取。");
+    if (charNames && Array.isArray(charNames)) {
+      // 每 20 個角色分一組
+      const nameChunks = Utils.chunkArray(charNames, 20);
+      
+      nameChunks.forEach((chunk, index) => {
+        console.log(`  > 正在抓取第 ${index + 1} 組角色背包 (併發數: ${chunk.length})...`);
+        
+        // 準備這一組的併發請求
+        const requests = chunk.map(name => {
+          return {
+            url: SYSTEM_CONFIG.BASE_URL + "/characters/" + encodeURIComponent(name) + "/inventory",
+            method: "get",
+            headers: { "Authorization": "Bearer " + SYSTEM_CONFIG.API_KEY },
+            muteHttpExceptions: true
+          };
+        });
+
+        // 執行平行請求
+        const responses = UrlFetchApp.fetchAll(requests);
+        
+        responses.forEach((res, i) => {
+          if (res.getResponseCode() === 200) {
+            const data = JSON.parse(res.getContentText());
+            allResults.push(["CHAR_" + chunk[i], JSON.stringify(data), timestamp]);
+          } else {
+            console.error(`  ❌ 角色 ${chunk[i]} 抓取失敗: ${res.getResponseCode()}`);
+          }
+        });
+      });
     }
+
+    // --- 第三階段：一次性入庫 ---
+    Data_System_Cache.overwriteAll(allResults);
+    console.log("🏁 全域資產收割流程結束。");
   }
 };
 
 /**
- * 手動測試用函式
- * 在 GAS 編輯器上方選擇此函式並按下「執行」，即可測試收割效果。
+ * 手動執行按鈕
  */
 function test_Asset_Fetch() {
   Data_Fetch_Asset.fetchAll();
