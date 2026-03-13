@@ -1,68 +1,33 @@
 /**
  * Data_System_Cache: 系統快取管理員
- * 負責將 API 抓回來的原始 JSON 存入快取分頁，或從中讀取。
  */
-
 const Data_System_Cache = {
 
   /**
-   * 存入快取
-   * @param {string} key - 快取的名稱 (例如 "BANK_DATA")
-   * @param {Object|Array} data - 要存入的 JSON 物件或陣列
+   * 批次覆蓋快取 (效能核心 + 保險機制)
+   * @param {Array<Array>} rows - 格式為 [[key, jsonString, timestamp], ...]
    */
-  save: function(key, data) {
+  overwriteAll: function(rows) {
+    // 保險機制：如果傳入的資料是空的，為了防止誤刪舊快取，直接中斷
+    if (!rows || rows.length === 0) {
+      console.warn("⚠️ 接收到空的資料集，取消覆蓋動作以保護舊有快取。");
+      return;
+    }
+
     const sheet = Utils.getSheetByTag(SYSTEM_CONFIG.TAGS.CACHE);
     if (!sheet) return;
 
-    const timestamp = new Date();
-    const jsonString = JSON.stringify(data);
-
-    // 我們假設 A 欄放 Key，B 欄放 JSON 字串，C 欄放更新時間
-    // 這裡使用一個簡單的查找邏輯：如果 Key 已存在就覆蓋，不存在就新增
+    const startRow = SYSTEM_CONFIG.LAYOUT.DATA_START_ROW;
     const lastRow = sheet.getLastRow();
-    let targetRow = 0;
 
-    if (lastRow >= SYSTEM_CONFIG.LAYOUT.DATA_START_ROW) {
-      const keys = sheet.getRange(
-        SYSTEM_CONFIG.LAYOUT.DATA_START_ROW, 
-        1, 
-        lastRow - SYSTEM_CONFIG.LAYOUT.DATA_START_ROW + 1, 
-        1
-      ).getValues();
-      
-      for (let i = 0; i < keys.length; i++) {
-        if (keys[i][0] === key) {
-          targetRow = i + SYSTEM_CONFIG.LAYOUT.DATA_START_ROW;
-          break;
-        }
-      }
+    // 1. 清空舊資料 (從第 11 列開始到最後一列，包含 A, B, C 三欄)
+    if (lastRow >= startRow) {
+      sheet.getRange(startRow, 1, lastRow - startRow + 1, 3).clearContent();
     }
 
-    if (targetRow === 0) targetRow = Math.max(lastRow + 1, SYSTEM_CONFIG.LAYOUT.DATA_START_ROW);
-
-    sheet.getRange(targetRow, 1, 1, 3).setValues([[key, jsonString, timestamp]]);
-  },
-
-  /**
-   * 讀取快取
-   * @param {string} key - 快取的名稱
-   * @return {Object|Array|null}
-   */
-  get: function(key) {
-    const sheet = Utils.getSheetByTag(SYSTEM_CONFIG.TAGS.CACHE);
-    if (!sheet) return null;
-
-    const lastRow = sheet.getLastRow();
-    if (lastRow < SYSTEM_CONFIG.LAYOUT.DATA_START_ROW) return null;
-
-    const data = sheet.getRange(
-      SYSTEM_CONFIG.LAYOUT.DATA_START_ROW, 
-      1, 
-      lastRow - SYSTEM_CONFIG.LAYOUT.DATA_START_ROW + 1, 
-      2
-    ).getValues();
-
-    const row = data.find(r => r[0] === key);
-    return row ? JSON.parse(row[1]) : null;
+    // 2. 一次性寫入新資料
+    sheet.getRange(startRow, 1, rows.length, 3).setValues(rows);
+    
+    console.log(`✅ 成功完成批次入庫，總計 ${rows.length} 項貨架標籤。`);
   }
 };
