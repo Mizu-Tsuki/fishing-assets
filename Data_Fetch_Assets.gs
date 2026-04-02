@@ -1,6 +1,9 @@
 /**
  * Data_Fetch_Assets: 負責從 GW2 API 抓取帳號資產並存入快取
  */
+function run_Asset_Update() {
+  Asset_Fetcher.run();
+}
 const Asset_Fetcher = {
 
   /**
