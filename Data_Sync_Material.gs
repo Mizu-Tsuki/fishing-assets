@@ -1,5 +1,5 @@
 /**
- * Data_Sync_Material: 素材展示同步組件 (字典連動版)
+ * Data_Sync_Material: 素材展示同步組件 (對齊隱藏欄位與 IMAGE 公式)
  */
 const Sync_Material = {
 
@@ -12,43 +12,43 @@ const Sync_Material = {
 
     const startRow = 11;
     
-    // 1. 取得全帳號資產與所有素材 ID / Category 映射
-    // assetMap: { id: { mats: 0, bank: 0, chars: { "角色名": 0 }, totalChars: 0 } }
+    // 1. 取得原始資產資料 (從 SYS_CACHE 拆解)
     const { assetMap, charNames, materialIds, categoryMap } = this._getAccountAssets();
 
-    if (materialIds.length === 0) return console.warn("素材庫快取為空，請先執行資產抓取。");
+    // 2. 核心修正：去重並過濾無效 ID，確保筆數精準
+    const cleanIds = [...new Set(materialIds)]
+      .map(id => String(id))
+      .filter(id => id && id !== "null" && id !== "undefined" && id !== "");
 
-    // 2. 呼叫字典經理：確保所有素材 ID 都有中文名、Icon 與 Category
-    // 這一步會自動補全 SYS_ITEMDB 並在有異動時整張重刷字典
-    const itemDbMap = Item_Manager.getOrUpdateItems(materialIds, categoryMap);
+    if (cleanIds.length === 0) return console.warn("素材庫快取為空，請先執行資產抓取。");
 
-    // 3. 準備渲染矩陣 (以素材庫官方排序為準)
-    const matrix = materialIds.map(id => {
+    // 3. 呼叫字典經理補全缺失資料
+    const itemDbMap = Item_Manager.getOrUpdateItems(cleanIds, categoryMap);
+
+    // 4. 準備渲染矩陣 (對齊 A:ID, B:隱藏網址, C:圖示, D:中文, E:英文, F:總計...)
+    const matrix = cleanIds.map(id => {
       const item = itemDbMap[id] || {};
       const assets = assetMap[id] || { mats: 0, bank: 0, chars: {}, totalChars: 0 };
-      
       const total = assets.mats + assets.bank + assets.totalChars;
 
-      // 基礎欄位：ID, Icon, Name_CN, Total, Mats, Bank, Char_Sum
-      const row = [
+      const rawIconUrl = item.icon || "";
+      // 生成給 C 欄使用的圖片公式
+      const iconFormula = rawIconUrl ? `=IMAGE("${rawIconUrl}")` : "";
+
+      return [
         id,                                // A: ID
-        item.icon || "",                   // B: Icon (URL)
-        item.name_cn || `未知物(ID:${id})`, // C: Name_CN
-        total,                             // D: Total
-        assets.mats,                       // E: Mats (素材庫)
-        assets.bank,                       // F: Bank (銀行)
-        assets.totalChars                  // G: Char_All (包包總計)
+        rawIconUrl,                        // B: 圖示連結 (隱藏欄)
+        iconFormula,                       // C: 圖示 (IMAGE公式)
+        item.name_cn || `未知物(ID:${id})`, // D: 中文名稱
+        item.name_en || "",                // E: 英文名稱
+        total,                             // F: 總計
+        assets.mats,                       // G: 素材庫
+        assets.bank,                       // H: 銀行
+        assets.totalChars                  // I: 角色合計
       ];
-
-      // 動態欄位：依照角色清單填入各別包包數量 (從 H 欄開始)
-      charNames.forEach(name => {
-        row.push(assets.chars[name] || 0);
-      });
-
-      return row;
     });
 
-    // 4. 寫入表格
+    // 5. 執行渲染
     this._renderToSheet(sheet, matrix, charNames, startRow);
   },
 
@@ -57,17 +57,20 @@ const Sync_Material = {
    */
   _getAccountAssets: function() {
     const cacheSheet = Utils.getSheetByTag("SYS_CACHE");
-    const data = cacheSheet.getRange(11, 1, cacheSheet.getLastRow() - 10, 2).getValues();
+    const lastRow = cacheSheet.getLastRow();
+    if (lastRow < 11) return { assetMap: {}, charNames: [], materialIds: [], categoryMap: {} };
+
+    const data = cacheSheet.getRange(11, 1, lastRow - 10, 2).getValues();
     
-    const assetMap = {};      // 存 ID 對應的各處數量
+    const assetMap = {};
     const charNamesSet = new Set();
-    const materialIds = [];   // 存素材庫 ID (決定排序)
-    const categoryMap = {};   // 存 ID 對應的素材分類
+    const materialIds = [];
+    const categoryMap = {};
 
     data.forEach(row => {
       const key = row[0];
       const jsonStr = row[1];
-      if (!jsonStr || jsonStr === "") return;
+      if (!jsonStr) return;
 
       const items = JSON.parse(jsonStr);
 
@@ -76,7 +79,7 @@ const Sync_Material = {
           if (!item) return;
           const id = String(item.id);
           materialIds.push(id);
-          categoryMap[id] = item.category; // 記錄分類編號給字典用
+          categoryMap[id] = item.category;
           this._addCount(assetMap, id, "mats", item.count);
         });
       } else if (key === "ASSET_BANK") {
@@ -104,9 +107,6 @@ const Sync_Material = {
     };
   },
 
-  /**
-   * 累加數量工具
-   */
   _addCount: function(map, id, type, count, charName = null) {
     if (!map[id]) map[id] = { mats: 0, bank: 0, chars: {}, totalChars: 0 };
     if (type === "chars") {
@@ -118,27 +118,33 @@ const Sync_Material = {
   },
 
   /**
-   * 執行最後的渲染與格式調整
+   * 渲染與清除舊資料
    */
   _renderToSheet: function(sheet, matrix, charNames, startRow) {
-    // 1. 處理標題 (H 欄以後的角色名)
-    const headerRange = sheet.getRange(10, 8, 1, Math.max(sheet.getLastColumn() - 7, 1));
+    // 處理 J 欄以後的角色標題 (因為現在 I 欄是角色合計)
+    const headerRange = sheet.getRange(10, 10, 1, Math.max(sheet.getLastColumn() - 9, 1));
     headerRange.clearContent();
     if (charNames.length > 0) {
-      sheet.getRange(10, 8, 1, charNames.length).setValues([charNames]);
+      sheet.getRange(10, 10, 1, charNames.length).setValues([charNames]);
     }
 
-    // 2. 清空舊資料區 (避免新表比舊表短)
     const lastRow = sheet.getLastRow();
+    const lastCol = sheet.getLastColumn();
     if (lastRow >= startRow) {
-      sheet.getRange(startRow, 1, lastRow - startRow + 1, sheet.getLastColumn()).clearContent();
+      sheet.getRange(startRow, 1, lastRow - startRow + 1, lastCol).clearContent();
     }
 
-    // 3. 寫入主矩陣
     if (matrix.length > 0) {
+      // 根據 matrix[0].length 自動決定寫入寬度
       sheet.getRange(startRow, 1, matrix.length, matrix[0].length).setValues(matrix);
     }
-
-    console.log(`素材庫同步完成，共更新 ${matrix.length} 筆物品。`);
+    console.log(`同步完成！素材總數：${matrix.length} 筆。`);
   }
 };
+
+/**
+ * 手動啟動器
+ */
+function run_Material_Sync() {
+  Sync_Material.sync();
+}
