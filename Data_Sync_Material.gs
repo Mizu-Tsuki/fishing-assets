@@ -1,54 +1,64 @@
 /**
- * Data_Sync_Material: 素材展示同步組件 (對齊隱藏欄位與 IMAGE 公式)
+ * Data_Sync_Material: 素材展示同步組件 (矩陣重排版)
  */
 const Sync_Material = {
 
-  /**
-   * 執行同步主程式
-   */
   sync: function() {
     const sheet = Utils.getSheetByTag("SYNC_MATERIAL");
     if (!sheet) return console.error("找不到 SYNC_MATERIAL 分頁");
 
     const startRow = 11;
     
-    // 1. 取得原始資產資料 (從 SYS_CACHE 拆解)
-    const { assetMap, charNames, materialIds, categoryMap } = this._getAccountAssets();
+    // 1. 取得 Key 導航圖 (第 2 行的配置)
+    // 取得第 2 行所有定義好的 Key，並過濾掉空值
+    const keyOrder = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0]
+                       .map(k => String(k).trim())
+                       .filter(k => k !== "");
 
-    // 2. 核心修正：去重並過濾無效 ID，確保筆數精準
+    if (keyOrder.length === 0) return console.error("第 2 行未定義資料 Key，同步中止。");
+
+    // 2. 準備原始資料源
+    const { assetMap, charNames, materialIds, categoryMap } = this._getAccountAssets();
+    
+    // 修正：去重並過濾無效 ID
     const cleanIds = [...new Set(materialIds)]
       .map(id => String(id))
-      .filter(id => id && id !== "null" && id !== "undefined" && id !== "");
+      .filter(id => id && id !== "null" && id !== "");
 
-    if (cleanIds.length === 0) return console.warn("素材庫快取為空，請先執行資產抓取。");
-
-    // 3. 呼叫字典經理補全缺失資料
+    // 3. 呼叫字典經理取得靜態資訊 (如名稱、圖示)
     const itemDbMap = Item_Manager.getOrUpdateItems(cleanIds, categoryMap);
 
-    // 4. 準備渲染矩陣 (對齊 A:ID, B:隱藏網址, C:圖示, D:中文, E:英文, F:總計...)
-    const matrix = cleanIds.map(id => {
+    // 4. 第一階段：建立「純資料物件池」 (Data Objects)
+    const rawDataObjects = cleanIds.map(id => {
       const item = itemDbMap[id] || {};
       const assets = assetMap[id] || { mats: 0, bank: 0, chars: {}, totalChars: 0 };
       const total = assets.mats + assets.bank + assets.totalChars;
 
-      const rawIconUrl = item.icon || "";
-      // 生成給 C 欄使用的圖片公式
-      const iconFormula = rawIconUrl ? `=IMAGE("${rawIconUrl}")` : "";
-
-      return [
-        id,                                // A: ID
-        rawIconUrl,                        // B: 圖示連結 (隱藏欄)
-        iconFormula,                       // C: 圖示 (IMAGE公式)
-        item.name_cn || `未知物(ID:${id})`, // D: 中文名稱
-        item.name_en || "",                // E: 英文名稱
-        total,                             // F: 總計
-        assets.mats,                       // G: 素材庫
-        assets.bank,                       // H: 銀行
-        assets.totalChars                  // I: 角色合計
-      ];
+      // 這裡就是你說的：先把資料都準備好，不管順序
+      return {
+        "ID": id,
+        "ICON_URL": item.icon || "",
+        "ICON": item.icon ? `=IMAGE("${item.icon}")` : "",
+        "NAME_CN": item.name_cn || `未知物(ID:${id})`,
+        "NAME_EN": item.name_en || "",
+        "TOTAL": total,
+        "MATS": assets.mats,
+        "BANK": assets.bank,
+        "CHAR_ALL": assets.totalChars,
+        // 額外預留：如果未來有動態欄位需求可擴充於此
+        ...assets.chars 
+      };
     });
 
-    // 5. 執行渲染
+    // 5. 第二階段：【矩陣重排】照著第 2 行的 KEY 順序，在記憶體中重新排隊
+    const matrix = rawDataObjects.map(obj => {
+      return keyOrder.map(key => {
+        // 如果 Key 在資料池裡有對應，就填入；沒有則留白
+        return obj[key] !== undefined ? obj[key] : "";
+      });
+    });
+
+    // 6. 渲染與寫入 (此處 matrix 已經是排好順序的二維陣列)
     this._renderToSheet(sheet, matrix, charNames, startRow);
   },
 
@@ -118,27 +128,26 @@ const Sync_Material = {
   },
 
   /**
-   * 渲染與清除舊資料
+   * 最終渲染：清空舊資料並寫入矩陣
    */
   _renderToSheet: function(sheet, matrix, charNames, startRow) {
-    // 處理 J 欄以後的角色標題 (因為現在 I 欄是角色合計)
-    const headerRange = sheet.getRange(10, 10, 1, Math.max(sheet.getLastColumn() - 9, 1));
-    headerRange.clearContent();
-    if (charNames.length > 0) {
-      sheet.getRange(10, 10, 1, charNames.length).setValues([charNames]);
-    }
-
+    // 1. 自動修正角色標題 (從 J10 開始，假設 J10 的 Key 定義為 CHAR_ALL 之後的動態欄位)
+    // 註：這部分根據你的實體表格需求調整，目前此程式碼會依照第 2 行的 Key 完整覆蓋
+    
     const lastRow = sheet.getLastRow();
     const lastCol = sheet.getLastColumn();
+    
+    // 清除舊的資料內容 (從第 11 行開始)
     if (lastRow >= startRow) {
       sheet.getRange(startRow, 1, lastRow - startRow + 1, lastCol).clearContent();
     }
 
+    // 2. 寫入重排後的矩陣
     if (matrix.length > 0) {
-      // 根據 matrix[0].length 自動決定寫入寬度
       sheet.getRange(startRow, 1, matrix.length, matrix[0].length).setValues(matrix);
     }
-    console.log(`同步完成！素材總數：${matrix.length} 筆。`);
+    
+    console.log(`同步完成！矩陣重排筆數：${matrix.length} 筆，欄位數：${matrix[0].length}`);
   }
 };
 
