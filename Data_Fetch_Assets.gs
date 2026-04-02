@@ -1,68 +1,96 @@
 /**
- * Data_Fetch_Asset: 資產收割機 (完全體)
+ * Data_Fetch_Assets: 負責從 GW2 API 抓取帳號資產並存入快取
  */
-const Data_Fetch_Asset = {
+const Asset_Fetcher = {
 
-  fetchAll: function() {
-    console.log("🚀 開始執行全域資產併發收割...");
-    const allResults = [];
-    const timestamp = new Date();
-
-    // --- 第一階段：銀行與素材庫 (基本盤) ---
-    const baseEndpoints = {
-      "ASSET_BANK": "/account/bank",
-      "ASSET_MATERIALS": "/account/materials"
-    };
+  /**
+   * 執行全帳號資產更新
+   */
+  run: function() {
+    console.log("開始抓取帳號資產...");
     
-    for (let key in baseEndpoints) {
-      const data = Conn_GW2.fetch(baseEndpoints[key]);
-      if (data) allResults.push([key, JSON.stringify(data), timestamp]);
-    }
+    // 1. 取得 API Key (假設你存在 SYSTEM_CONFIG 或特定位置)
+    const apiKey = SYSTEM_CONFIG.API_KEY; 
+    if (!apiKey) return console.error("請先在 SYSTEM_CONFIG 中設定 API_KEY");
 
-    // --- 第二階段：角色背包 (併發分組盤) ---
-    console.log("👤 正在獲取角色清單...");
-    const charNames = Conn_GW2.fetch("/characters");
-    
-    if (charNames && Array.isArray(charNames)) {
-      // 每 20 個角色分一組
-      const nameChunks = Utils.chunkArray(charNames, 20);
-      
-      nameChunks.forEach((chunk, index) => {
-        console.log(`  > 正在抓取第 ${index + 1} 組角色背包 (併發數: ${chunk.length})...`);
-        
-        // 準備這一組的併發請求
-        const requests = chunk.map(name => {
-          return {
-            url: SYSTEM_CONFIG.BASE_URL + "/characters/" + encodeURIComponent(name) + "/inventory",
-            method: "get",
-            headers: { "Authorization": "Bearer " + SYSTEM_CONFIG.API_KEY },
-            muteHttpExceptions: true
-          };
-        });
+    const cacheSheet = Utils.getSheetByTag("SYS_CACHE");
+    if (!cacheSheet) return console.error("找不到 SYS_CACHE 分頁");
 
-        // 執行平行請求
-        const responses = UrlFetchApp.fetchAll(requests);
-        
-        responses.forEach((res, i) => {
-          if (res.getResponseCode() === 200) {
-            const data = JSON.parse(res.getContentText());
-            allResults.push(["CHAR_" + chunk[i], JSON.stringify(data), timestamp]);
-          } else {
-            console.error(`  ❌ 角色 ${chunk[i]} 抓取失敗: ${res.getResponseCode()}`);
-          }
-        });
+    // 2. 定義要抓取的目標與對應的 API 路徑
+    const targets = [
+      { key: "ASSET_MATERIALS", url: "/account/materials" },
+      { key: "ASSET_BANK", url: "/account/bank" },
+      { key: "ASSET_WALLET", url: "/account/wallet" }
+    ];
+
+    const results = [];
+
+    // --- A. 抓取共通資產 (素材、銀行、錢包) ---
+    targets.forEach(target => {
+      const data = this._fetch(target.url, apiKey);
+      if (data) {
+        results.push([target.key, JSON.stringify(data), new Date()]);
+      }
+    });
+
+    // --- B. 抓取角色清單與各別包包 ---
+    const characters = this._fetch("/characters?page=0", apiKey); // 抓取所有角色詳細資料
+    if (characters && Array.isArray(characters)) {
+      characters.forEach(char => {
+        const charKey = `CHAR_${char.name}`;
+        // 提取該角色的背包 (bags) 資料
+        const bagData = char.bags || [];
+        results.push([charKey, JSON.stringify(bagData), new Date()]);
       });
     }
 
-    // --- 第三階段：一次性入庫 ---
-    Data_System_Cache.overwriteAll(allResults);
-    console.log("🏁 全域資產收割流程結束。");
+    // 3. 寫入 SYS_CACHE (從 Row 11 開始，整張覆蓋)
+    if (results.length > 0) {
+      this._saveToCache(cacheSheet, results);
+      console.log("SYS_CACHE 更新成功。");
+    }
+
+    // --- C. 【核心連動】自動觸發後續同步 ---
+    console.log("偵測到資產更新，自動啟動素材庫同步...");
+    try {
+      Sync_Material.sync(); 
+      console.log("所有自動化同步已完成！");
+    } catch (e) {
+      console.error("自動同步失敗: " + e.message);
+    }
+  },
+
+  /**
+   * 內部私有：API 請求工具
+   */
+  _fetch: function(endpoint, apiKey) {
+    const url = `${SYSTEM_CONFIG.BASE_URL}${endpoint}`;
+    const options = {
+      headers: { "Authorization": `Bearer ${apiKey}` },
+      muteHttpExceptions: true
+    };
+    try {
+      const response = UrlFetchApp.fetch(url, options);
+      if (response.getResponseCode() === 200) {
+        return JSON.parse(response.getContentText());
+      } else {
+        console.warn(`API 警告 (${endpoint}): ${response.getContentText()}`);
+        return null;
+      }
+    } catch (e) {
+      console.error(`Fetch 失敗 (${endpoint}): ${e.message}`);
+      return null;
+    }
+  },
+
+  /**
+   * 內部私有：寫入快取表
+   */
+  _saveToCache: function(sheet, results) {
+    const lastRow = sheet.getLastRow();
+    if (lastRow >= 11) {
+      sheet.getRange(11, 1, lastRow - 10, 3).clearContent();
+    }
+    sheet.getRange(11, 1, results.length, 3).setValues(results);
   }
 };
-
-/**
- * 手動執行按鈕
- */
-function test_Asset_Fetch() {
-  Data_Fetch_Asset.fetchAll();
-}
