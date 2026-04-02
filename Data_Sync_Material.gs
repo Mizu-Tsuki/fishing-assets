@@ -1,166 +1,144 @@
 /**
- * Data_Sync_Material: 素材展示同步組件
- * 功能：
- * 1. 讀取 Row 2 標籤決定填入內容。
- * 2. 支援 CHAR_DYNAMIC 標籤，從該欄起自動展開所有角色背包數量。
- * 3. 自動從 ItemDB 補全中文與英文名稱。
+ * Data_Sync_Material: 素材展示同步組件 (字典連動版)
  */
 const Sync_Material = {
 
+  /**
+   * 執行同步主程式
+   */
   sync: function() {
-    // 使用你設定的 TAG: SYNC_MATERIAL
     const sheet = Utils.getSheetByTag("SYNC_MATERIAL");
-    if (!sheet) {
-      console.error("❌ 找不到標籤為 SYNC_MATERIAL 的分頁。請檢查 A1 是否正確。");
-      return;
-    }
+    if (!sheet) return console.error("找不到 SYNC_MATERIAL 分頁");
 
-    const startRow = 11; // 資料起始行
-    const lastRow = sheet.getLastRow();
-    if (lastRow < startRow) {
-      console.warn("⚠️ 展示表內無 ID 資料。");
-      return;
-    }
-
-    // 1. 讀取 Row 2 的標籤定義
-    const configRow = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0];
-    const dynamicStartIdx = configRow.indexOf("CHAR_DYNAMIC");
-
-    // 2. 獲取全帳號資產與角色清單 (從 Cache 讀取)
-    const { assetMap, charNames } = this._getAccountAssets();
+    const startRow = 11;
     
-    // 3. 處理動態區：清空並重新寫入角色標題 (Row 10)
-    if (dynamicStartIdx !== -1) {
-      const maxCols = sheet.getMaxColumns();
-      const dynamicColStart = dynamicStartIdx + 1; // 轉為 1-based index
+    // 1. 取得全帳號資產與所有素材 ID / Category 映射
+    // assetMap: { id: { mats: 0, bank: 0, chars: { "角色名": 0 }, totalChars: 0 } }
+    const { assetMap, charNames, materialIds, categoryMap } = this._getAccountAssets();
+
+    if (materialIds.length === 0) return console.warn("素材庫快取為空，請先執行資產抓取。");
+
+    // 2. 呼叫字典經理：確保所有素材 ID 都有中文名、Icon 與 Category
+    // 這一步會自動補全 SYS_ITEMDB 並在有異動時整張重刷字典
+    const itemDbMap = Item_Manager.getOrUpdateItems(materialIds, categoryMap);
+
+    // 3. 準備渲染矩陣 (以素材庫官方排序為準)
+    const matrix = materialIds.map(id => {
+      const item = itemDbMap[id] || {};
+      const assets = assetMap[id] || { mats: 0, bank: 0, chars: {}, totalChars: 0 };
       
-      // 清空從 CHAR_DYNAMIC 開始往右的所有內容 (Row 10 及其下方所有列)
-      if (maxCols >= dynamicColStart) {
-        sheet.getRange(10, dynamicColStart, sheet.getMaxRows() - 9, maxCols - dynamicStartIdx).clearContent();
-      }
-      // 在 Row 10 寫入角色名稱
-      if (charNames.length > 0) {
-        sheet.getRange(10, dynamicColStart, 1, charNames.length).setValues([charNames]);
-      }
-    }
+      const total = assets.mats + assets.bank + assets.totalChars;
 
-    // 4. 讀取 A 欄 ID
-    const ids = sheet.getRange(startRow, 1, lastRow - startRow + 1, 1).getValues().map(r => String(r[0]).trim());
-    
-    // 5. 獲取 ItemDB 字典映射
-    const itemDb = this._getItemDbMap();
+      // 基礎欄位：ID, Icon, Name_CN, Total, Mats, Bank, Char_Sum
+      const row = [
+        id,                                // A: ID
+        item.icon || "",                   // B: Icon (URL)
+        item.name_cn || `未知物(ID:${id})`, // C: Name_CN
+        total,                             // D: Total
+        assets.mats,                       // E: Mats (素材庫)
+        assets.bank,                       // F: Bank (銀行)
+        assets.totalChars                  // G: Char_All (包包總計)
+      ];
 
-    // 6. 構建資料矩陣
-    const totalCols = (dynamicStartIdx !== -1) ? (dynamicStartIdx + charNames.length) : configRow.length;
-    
-    const finalValues = ids.map(id => {
-      const rowData = new Array(totalCols).fill("");
-      if (!id || id === "") return rowData;
-
-      const assets = assetMap[id] || { total: 0, mats: 0, bank: 0, charAll: 0, chars: {} };
-      const info = itemDb[id] || { cn: "", en: "" };
-
-      // 依照 Row 2 的標籤填入固定區
-      configRow.forEach((tag, idx) => {
-        if (dynamicStartIdx !== -1 && idx >= dynamicStartIdx) return;
-        
-        if (tag === "ID") rowData[idx] = id;
-        else if (tag === "NAME_CN") rowData[idx] = info.cn;
-        else if (tag === "NAME_EN") rowData[idx] = info.en;
-        else if (tag === "TOTAL") rowData[idx] = assets.total;
-        else if (tag === "MATS") rowData[idx] = assets.mats;
-        else if (tag === "BANK") rowData[idx] = assets.bank;
-        else if (tag === "CHAR_ALL") rowData[idx] = assets.charAll;
+      // 動態欄位：依照角色清單填入各別包包數量 (從 H 欄開始)
+      charNames.forEach(name => {
+        row.push(assets.chars[name] || 0);
       });
 
-      // 填入動態角色包包數量
-      if (dynamicStartIdx !== -1) {
-        charNames.forEach((name, i) => {
-          rowData[dynamicStartIdx + i] = assets.chars[name] || 0;
-        });
-      }
-
-      return rowData;
+      return row;
     });
 
-    // 7. 一次性回寫
-    sheet.getRange(startRow, 1, finalValues.length, totalCols).setValues(finalValues);
-    console.log(`✨ 同步成功！已處理 ${ids.length} 項物品，自動展開 ${charNames.length} 個角色。`);
+    // 4. 寫入表格
+    this._renderToSheet(sheet, matrix, charNames, startRow);
   },
 
   /**
-   * 私有函式：從 Cache 建立資產地圖與角色名單
+   * 內部私有：拆解所有資產 JSON 並計算數量
    */
   _getAccountAssets: function() {
     const cacheSheet = Utils.getSheetByTag("SYS_CACHE");
-    if (!cacheSheet) return { assetMap: {}, charNames: [] };
-
     const data = cacheSheet.getRange(11, 1, cacheSheet.getLastRow() - 10, 2).getValues();
-    const assetMap = {};
+    
+    const assetMap = {};      // 存 ID 對應的各處數量
     const charNamesSet = new Set();
+    const materialIds = [];   // 存素材庫 ID (決定排序)
+    const categoryMap = {};   // 存 ID 對應的素材分類
 
     data.forEach(row => {
       const key = row[0];
       const jsonStr = row[1];
-      if (!jsonStr || !key) return;
+      if (!jsonStr || jsonStr === "") return;
 
-      try {
-        const items = JSON.parse(jsonStr);
-        if (key === "ASSET_MATERIALS") {
-          this._merge(assetMap, items, "mats");
-        } else if (key === "ASSET_BANK") {
-          this._merge(assetMap, items, "bank");
-        } else if (key.startsWith("CHAR_")) {
-          const name = key.replace("CHAR_", "");
-          charNamesSet.add(name);
-          if (items.bags) {
-            items.bags.forEach(bag => {
-              if (bag && bag.inventory) {
-                this._merge(assetMap, bag.inventory, "char", name);
-              }
+      const items = JSON.parse(jsonStr);
+
+      if (key === "ASSET_MATERIALS") {
+        items.forEach(item => {
+          if (!item) return;
+          const id = String(item.id);
+          materialIds.push(id);
+          categoryMap[id] = item.category; // 記錄分類編號給字典用
+          this._addCount(assetMap, id, "mats", item.count);
+        });
+      } else if (key === "ASSET_BANK") {
+        items.forEach(item => {
+          if (item) this._addCount(assetMap, String(item.id), "bank", item.count);
+        });
+      } else if (key.startsWith("CHAR_")) {
+        const charName = key.replace("CHAR_", "");
+        charNamesSet.add(charName);
+        items.forEach(bag => {
+          if (bag && bag.inventory) {
+            bag.inventory.forEach(item => {
+              if (item) this._addCount(assetMap, String(item.id), "chars", item.count, charName);
             });
           }
-        }
-      } catch (e) {
-        console.warn(`解析 ${key} 失敗:`, e);
+        });
       }
     });
 
-    return { assetMap, charNames: Array.from(charNamesSet).sort() };
+    return { 
+      assetMap, 
+      charNames: Array.from(charNamesSet).sort(), 
+      materialIds, 
+      categoryMap 
+    };
   },
 
-  _merge: function(map, items, type, charName) {
-    items.forEach(item => {
-      if (!item || !item.id) return;
-      const id = String(item.id);
-      if (!map[id]) map[id] = { total: 0, mats: 0, bank: 0, charAll: 0, chars: {} };
-      
-      const count = item.count || 0;
-      map[id].total += count;
-      if (type === "mats") map[id].mats += count;
-      else if (type === "bank") map[id].bank += count;
-      else if (type === "char") {
-        map[id].charAll += count;
-        map[id].chars[charName] = (map[id].chars[charName] || 0) + count;
-      }
-    });
+  /**
+   * 累加數量工具
+   */
+  _addCount: function(map, id, type, count, charName = null) {
+    if (!map[id]) map[id] = { mats: 0, bank: 0, chars: {}, totalChars: 0 };
+    if (type === "chars") {
+      map[id].chars[charName] = (map[id].chars[charName] || 0) + count;
+      map[id].totalChars += count;
+    } else {
+      map[id][type] += count;
+    }
   },
 
-  _getItemDbMap: function() {
-    const dbSheet = Utils.getSheetByTag("SYS_ITEMDB");
-    if (!dbSheet) return {};
-    const lastRow = dbSheet.getLastRow();
-    if (lastRow < 11) return {};
-    const data = dbSheet.getRange(11, 1, lastRow - 10, 4).getValues();
-    const map = {};
-    data.forEach(r => { map[String(r[0])] = { cn: r[2], en: r[3] }; });
-    return map;
+  /**
+   * 執行最後的渲染與格式調整
+   */
+  _renderToSheet: function(sheet, matrix, charNames, startRow) {
+    // 1. 處理標題 (H 欄以後的角色名)
+    const headerRange = sheet.getRange(10, 8, 1, Math.max(sheet.getLastColumn() - 7, 1));
+    headerRange.clearContent();
+    if (charNames.length > 0) {
+      sheet.getRange(10, 8, 1, charNames.length).setValues([charNames]);
+    }
+
+    // 2. 清空舊資料區 (避免新表比舊表短)
+    const lastRow = sheet.getLastRow();
+    if (lastRow >= startRow) {
+      sheet.getRange(startRow, 1, lastRow - startRow + 1, sheet.getLastColumn()).clearContent();
+    }
+
+    // 3. 寫入主矩陣
+    if (matrix.length > 0) {
+      sheet.getRange(startRow, 1, matrix.length, matrix[0].length).setValues(matrix);
+    }
+
+    console.log(`素材庫同步完成，共更新 ${matrix.length} 筆物品。`);
   }
 };
-
-/**
- * 手動同步入口
- */
-function run_Material_Sync() {
-  Sync_Material.sync();
-}
